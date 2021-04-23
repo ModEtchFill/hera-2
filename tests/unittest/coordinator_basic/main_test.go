@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -52,6 +53,10 @@ func before() error {
 	if tableName == "" {
 		tableName = "jdbc_hera_test"
 	}
+	if strings.HasPrefix(os.Getenv("TWO_TASK"), "tcp") {
+		// mysql
+		testutil.RunDML("create table jdbc_hera_test ( ID BIGINT, INT_VAL BIGINT, STR_VAL VARCHAR(500))")
+	}
 	return nil
 }
 
@@ -78,7 +83,7 @@ func TestCoordinatorBasic(t *testing.T) {
 		t.Fatalf("Error getting connection %s\n", err.Error())
 	}
 	tx, _ := conn.BeginTx(ctx, nil)
-	stmt, _ := tx.PrepareContext(ctx, "/*cmd*/delete "+tableName)
+	stmt, _ := tx.PrepareContext(ctx, "/*cmd*/delete from "+tableName)
 	_, err = stmt.Exec()
 	if err != nil {
 		t.Fatalf("Error preparing test (delete table) %s\n", err.Error())

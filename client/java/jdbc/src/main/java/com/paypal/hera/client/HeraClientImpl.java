@@ -70,6 +70,8 @@ public class HeraClientImpl implements HeraClient{
 	private String serverLogicalName;
 	private String calLogFrequency;
 	private String heraHostName;
+	private boolean isFirstSQL;
+	//TODO: migrate stale conn impl from OpenDAK.
 
 	public HeraClientImpl(HeraClientConnection _conn, int _connTimeout, boolean _columnNamesEnabled, boolean _columnInfoEnabled) throws HeraExceptionBase{
 		conn = _conn;
@@ -396,6 +398,10 @@ public class HeraClientImpl implements HeraClient{
 		}
 		return columnMeta;
 	} 	
+
+	public boolean packetHasMoreData() {
+		return response.hasNext();
+	}
 	
 	public void execDML(boolean _add_commit) throws SQLException {
 		if (LOGGER.isDebugEnabled())
@@ -812,13 +818,22 @@ public class HeraClientImpl implements HeraClient{
 	}
 
 	@Override
-	public void ping() throws HeraExceptionBase {
+	public void ping(int tmo) throws HeraExceptionBase {
 		if (LOGGER.isDebugEnabled())
 			LOGGER.debug("HeraClient::sendPing()");
 		os.add(HeraConstants.SERVER_PING_COMMAND, "".getBytes());
 		try {
 			os.flush();
+			int oldTmo = 0;
+			if (tmo > 0) {
+				oldTmo = conn.getSoTimeout();
+				conn.setSoTimeout(tmo);
+			}
 			NetStringObj resp = getResponse("HERA_CLIENT_PING");
+			// restore the timeout
+			if (tmo > 0) {
+				conn.setSoTimeout(oldTmo);
+			}
 			if (resp.getCommand() != HeraConstants.SERVER_ALIVE){
 				throw new HeraClientException("HeraClient::sendPing(): Error " + resp.getCommand());
 			}
@@ -837,6 +852,11 @@ public class HeraClientImpl implements HeraClient{
 		ConnectionMetaInfo connectionMetaInfo = new ConnectionMetaInfo();
 		connectionMetaInfo.setServerBoxName(heraHostName);
 		return connectionMetaInfo;
+	}
+
+	@Override
+	public void setFirstSQL(boolean isFirstSQL) {
+		this.isFirstSQL = isFirstSQL;
 	}
 
 }

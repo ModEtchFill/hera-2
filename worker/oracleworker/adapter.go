@@ -24,12 +24,17 @@ import (
 	"os"
 	"strings"
 
-	_ "gopkg.in/goracle.v2"
+	_ "github.com/godror/godror"
 	"github.com/paypal/hera/utility/logger"
 	"github.com/paypal/hera/worker/shared"
+	"github.com/paypal/hera/common"
 )
 
 type oracleAdapter struct {
+}
+
+func (adapter *oracleAdapter) MakeSqlParser() (common.SQLParser, error) {
+	return common.NewRegexSQLParser()
 }
 
 // InitDB creates sql.DB object for conection to the database, using "username", "password" and "TWO_TASK" environment
@@ -48,7 +53,7 @@ func (adapter *oracleAdapter) InitDB() (*sql.DB, error) {
 		return nil, errors.New("Can't get 'TWO_TASK' from env")
 	}
 
-	return sql.Open("goracle", fmt.Sprintf("%s/%s@%s", user, pass, ds))
+	return sql.Open("godror", fmt.Sprintf("%s/%s@%s", user, pass, ds))
 }
 
 func (adapter *oracleAdapter) UseBindNames() bool {

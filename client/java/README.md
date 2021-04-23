@@ -1,9 +1,6 @@
 # hera-jdbc - A Java Client for Hera
-[![Build Status](https://img.shields.io/travis/com/paypal/hera-jdbc.svg?style=flat-square)](https://travis-ci.com/paypal/hera-jdbc)
 [![License](https://img.shields.io/badge/Licence-Apache%202.0-blue.svg?style=flat-square)](http://www.apache.org/licenses/LICENSE-2.0.html)
-[![Maven Central](https://img.shields.io/maven-central/v/io.hera/hera-jdbc-core.svg?style=flat-square)](https://search.maven.org/#search%7Cga%7C1%7Cio.hera)
-[![GitHub release](https://img.shields.io/github/release/paypal/hera-jdbc.svg?style=flat-square)](https://github.com/paypal/hera-jdbc/releases)
-[![Javadocs](http://www.javadoc.io/badge/io/hera/hera-jdbc-core.svg)](http://www.javadoc.io/doc/io/hera/hera-jdbc-core)
+[![Maven Central](https://img.shields.io/maven-central/v/com.paypal.hera/hera-jdbc.svg?style=flat-square)](https://search.maven.org/#search%7Cga%7C1%7Ccom.paypal.hera)
 
 hera-jdbc is the JDBC driver for [hera](https://github.com/paypal/hera).
 
@@ -34,8 +31,6 @@ String host = "1:127.0.0.1:11111";
 Properties props = new Properties();
 // Override any default property
 props.setProperty(HeraClientConfigHolder.RESPONSE_TIMEOUT_MS_PROPERTY, "3000");
-// register
-Class.forName("com.paypal.hera.jdbc.HeraDriver");
 dbConn = DriverManager.getConnection("jdbc:hera:" + host, props);
 
 // do standard JDBC

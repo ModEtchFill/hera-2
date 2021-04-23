@@ -33,7 +33,6 @@ import (
 
 	"github.com/paypal/hera/cal"
 	"github.com/paypal/hera/common"
-	"github.com/paypal/hera/utility"
 	"github.com/paypal/hera/utility/encoding/netstring"
 	"github.com/paypal/hera/utility/logger"
 )
@@ -67,9 +66,10 @@ type workerMsg struct {
 	// EOR IN_TRANSACTION or EOR IN_CURSOR_IN_TRANSACTION is received
 	inTransaction bool
 	// tell coordinator to abort dosession with an ErrWorkerFail. call will recover worker.
-	abort bool
+	abort     bool
+	bindEvict bool
 	// the request counter / Id
-	rqId uint16
+	rqId uint32
 	// the actual message to be sent to the client
 	ns *netstring.Netstring
 }
@@ -81,17 +81,23 @@ func (msg *workerMsg) GetNetstring() *netstring.Netstring {
 	return msg.ns
 }
 
+type BindPair struct {
+	name  string
+	value string
+}
+
 // WorkerClient represents a worker process
 type WorkerClient struct {
-	ID         int              // the worker identifier, from 0 to max worker count
-	Type       HeraWorkerType   // the type of worker (ex write, read); all workers from the same type are grouped in a pool
-	Status     HeraWorkerStatus // the worker state, like init, accept, etc
-	workerConn net.Conn         // the connetion over which it communicates with the worker process
-	pid        int              // worker pid, needed to check terminated worker before recycling a new one
-	instID     int              // currently 0 or 1
-	shardID    int              //
-	racID      int              // for RAC maintenance, the rac ID where the worker connected
-	dbUname    string           // the database name where the worker connected
+	ID            int              // the worker identifier, from 0 to max worker count
+	Type          HeraWorkerType   // the type of worker (ex write, read); all workers from the same type are grouped in a pool
+	Status        HeraWorkerStatus // the worker state, like init, accept, etc
+	workerConn    net.Conn         // the connection over which it communicates with the worker process
+	workerOOBConn net.Conn         // the connection over which it sends out-of-band messages
+	pid           int              // worker pid, needed to check terminated worker before recycling a new one
+	instID        int              // currently 0 or 1
+	shardID       int              //
+	racID         int              // for RAC maintenance, the rac ID where the worker connected
+	dbUname       string           // the database name where the worker connected
 
 	//
 	// sending data message from worker to coordinator (owner == doRead thread)
@@ -116,6 +122,9 @@ type WorkerClient struct {
 	//
 	sqlHash int32
 	//
+	// for bind eviction
+	sqlBindNs atomic.Value // *netstring.Netstring
+	//
 	// time since hera_start in ms when the current prepare statement is sent to worker.
 	// reset to 0 after eor meaning no sql running (same as start_time_offset_ms in c++).
 	//
@@ -131,12 +140,15 @@ type WorkerClient struct {
 	// the maximum number of requests the worker is allowed, randomized value of "max_requests_per_child" ops config value
 	maxReqCount uint32
 	// request counter / identifier used when the mux interrupts an executing worker request
-	rqId uint16
+	rqId uint32
 
 	//
 	// under recovery. 0: no; 1: yes. use atomic.CompareAndSwapInt32 to check state.
 	//
 	isUnderRecovery int32
+
+	// Throtle workers lifecycle
+	thr Throttler
 }
 
 type strandedCalInfo struct {
@@ -145,6 +157,11 @@ type strandedCalInfo struct {
 	laddr      string // remote address
 	//TODO: Add prefix later; for now we only recover because of tmo, so no need of prefix
 }
+
+var dbUserName string
+var dbPassword string
+var dbPassword2 string
+var dbPassword3 string
 
 /**
  * Update or insert into the environment
@@ -163,8 +180,8 @@ func envUpsert(attr *syscall.ProcAttr, key string, val string) {
 }
 
 // NewWorker creates a new workerclient instance (pointer)
-func NewWorker(wid int, wType HeraWorkerType, instID int, shardID int, moduleName string) *WorkerClient {
-	worker := &WorkerClient{ID: wid, Type: wType, Status: wsUnset, instID: instID, shardID: shardID, moduleName: moduleName}
+func NewWorker(wid int, wType HeraWorkerType, instID int, shardID int, moduleName string, thr Throttler) *WorkerClient {
+	worker := &WorkerClient{ID: wid, Type: wType, Status: wsUnset, instID: instID, shardID: shardID, moduleName: moduleName, thr: thr}
 	maxReqs := GetMaxRequestsPerChild()
 	if maxReqs >= 4 {
 		worker.maxReqCount = maxReqs - uint32(rand.Intn(int(maxReqs/4)))
@@ -173,6 +190,9 @@ func NewWorker(wid int, wType HeraWorkerType, instID int, shardID int, moduleNam
 	lifespan := GetMaxLifespanPerChild()
 	if lifespan >= 4 {
 		worker.exitTime = worker.startTime + int64(lifespan) - int64(rand.Intn(int(lifespan/4)))
+	}
+	if logger.GetLogger().V(logger.Debug) {
+		logger.GetLogger().Log(logger.Debug, fmt.Sprintf("workerId=%d max_requests_per_child=%d max_lifespan_per_child=%d exitTime=%d", worker.ID, worker.maxReqCount, worker.exitTime-worker.startTime, worker.exitTime))
 	}
 	// TODO
 	worker.racID = -1
@@ -194,14 +214,19 @@ func NewWorker(wid int, wType HeraWorkerType, instID int, shardID int, moduleNam
 func (worker *WorkerClient) StartWorker() (err error) {
 	attr := syscall.ProcAttr{Dir: "./", Env: os.Environ(), Files: nil, Sys: nil}
 	var dbHostName string
-	if len(worker.moduleName) > 4 {
-		dbHostName = strings.ToUpper(worker.moduleName[4:])
-		pos := strings.Index(dbHostName, "-")
-		if pos != -1 {
-			dbHostName = dbHostName[:pos]
-		}
+	logDbHostName := os.Getenv("LOG_DB_HOST_NAME")
+	if len(logDbHostName) > 0 {
+		dbHostName = logDbHostName
 	} else {
-		return errors.New("Invalid module name, must be like hera-<name> ")
+		if len(worker.moduleName) > 4 {
+			dbHostName = strings.ToUpper(worker.moduleName[4:])
+			pos := strings.Index(dbHostName, "-")
+			if pos != -1 {
+				dbHostName = dbHostName[:pos]
+			}
+		} else {
+			return errors.New("Invalid module name, must be like hera-<name> ")
+		}
 	}
 
 	var twoTask string
@@ -326,25 +351,49 @@ func (worker *WorkerClient) StartWorker() (err error) {
 			return errors.New("TWO_TASK is not defined")
 		}
 	}
+
+	_, ok := os.LookupEnv("username")
+	if !ok {
+		envUpsert(&attr, "username", dbUserName)
+	}
+	_, ok = os.LookupEnv("password")
+	if !ok {
+		envUpsert(&attr, "password", dbPassword)
+	}
+	envUpsert(&attr, "password2", dbPassword2)
+	envUpsert(&attr, "password3", dbPassword3)
 	envUpsert(&attr, "mysql_datasource", twoTask)
 
 	socketPair, err := syscall.Socketpair(syscall.AF_LOCAL, syscall.SOCK_STREAM, 0)
 	if err != nil {
 		return err
 	}
-	attr.Files = make([]uintptr, 4)
+	socketPair2, err := syscall.Socketpair(syscall.AF_LOCAL, syscall.SOCK_STREAM, 0)
+	if err != nil {
+		return err
+	}
+	attr.Files = make([]uintptr, 5)
 	attr.Files[0] = 0
 	attr.Files[1] = 1
 	attr.Files[2] = 2
 	attr.Files[3] = uintptr(socketPair[1])
+	attr.Files[4] = uintptr(socketPair2[1])
 
 	// !use a net.Conn instead of os.File, although either would work since they implement Read() interface.
 	// os.File uses syscalls.Read which at this time (go 1.10) locks the OS thread while net.Conn uses netpoll
-	file := os.NewFile(uintptr(socketPair[0]), fmt.Sprintf("worker_%d", worker.ID))
-	if file != nil {
-		defer file.Close()
+	fileData := os.NewFile(uintptr(socketPair[0]), fmt.Sprintf("worker_%d", worker.ID))
+	if fileData != nil {
+		defer fileData.Close()
 	}
-	worker.workerConn, err = net.FileConn(file)
+	worker.workerConn, err = net.FileConn(fileData)
+	if err != nil {
+		return err
+	}
+	fileOOB := os.NewFile(uintptr(socketPair2[0]), fmt.Sprintf("workeroob_%d", worker.ID))
+	if fileOOB != nil {
+		defer fileOOB.Close()
+	}
+	worker.workerOOBConn, err = net.FileConn(fileOOB)
 	if err != nil {
 		return err
 	}
@@ -379,12 +428,13 @@ func (worker *WorkerClient) StartWorker() (err error) {
 		buf.WriteString("_shard_")
 		buf.WriteString(strconv.Itoa(worker.shardID))
 	}
-	evt := cal.NewCalEvent("MUX", buf.String(), cal.TransOK, "")
+	evt := cal.NewCalEvent(EvtTypeMux, buf.String(), cal.TransOK, "")
 	evt.Completed()
 
 	// TODO: change to use "exec"
 	pid, er := syscall.ForkExec(workerPath, argv, &attr)
 	syscall.Close(socketPair[1])
+	syscall.Close(socketPair2[1])
 	if er != nil {
 		if logger.GetLogger().V(logger.Info) {
 			logger.GetLogger().Log(logger.Info, "start worker failure ", er.Error(), " worker_path ", workerPath, " id", worker.ID)
@@ -399,7 +449,6 @@ func (worker *WorkerClient) StartWorker() (err error) {
 		logger.GetLogger().Log(logger.Info, "Started ", workerPath, ", pid=", pid)
 	}
 	worker.pid = pid
-
 	worker.setState(wsInit)
 	return nil
 }
@@ -415,6 +464,10 @@ func (worker *WorkerClient) AttachToWorker() (err error) {
 		if worker.workerConn != nil {
 			worker.workerConn.Close()
 			worker.workerConn = nil
+		}
+		if worker.workerOOBConn != nil {
+			worker.workerOOBConn.Close()
+			worker.workerOOBConn = nil
 		}
 	}
 	return err
@@ -482,10 +535,13 @@ func (worker *WorkerClient) attachToWorker() (err error) {
 	return nil
 }
 
-// Close close the connection to the worker
+// Close close the connections to the worker
 func (worker *WorkerClient) Close() {
 	if worker.workerConn != nil {
 		worker.workerConn.Close()
+	}
+	if worker.workerOOBConn != nil {
+		worker.workerOOBConn.Close()
 	}
 }
 
@@ -493,12 +549,10 @@ func (worker *WorkerClient) Close() {
  * Sends the recover signal to the worker
  */
 func (worker *WorkerClient) initiateRecover(param int) {
-	param = param << 16
-	param += int(worker.rqId)
-	if logger.GetLogger().V(logger.Verbose) {
-		logger.GetLogger().Log(logger.Verbose, "SIGHUP: flag =", param>>16, ", rqId =", param&0xFFFF)
-	}
-	utility.KillParam(worker.pid, int(syscall.SIGHUP), param)
+	buff := []byte{byte(param), byte((worker.rqId & 0xFF000000) >> 24), byte((worker.rqId & 0x00FF0000) >> 16),
+		byte((worker.rqId & 0x0000FF00) >> 8), byte((worker.rqId & 0x000000FF))}
+	ns := netstring.NewNetstringFrom(common.CmdInterruptMsg, buff)
+	worker.workerOOBConn.Write(ns.Serialized)
 }
 
 /**
@@ -568,6 +622,8 @@ func (worker *WorkerClient) Recover(p *WorkerPool, ticket string, info *stranded
 	for {
 		select {
 		case <-workerRecoverTimeout:
+			worker.thr.CanRun()
+			worker.setState(wsInit) // Set the worker state to INIT when we decide to Terminate the worker
 			worker.Terminate()
 			worker.callogStranded("RECYCLED", info)
 			return
@@ -591,7 +647,7 @@ func (worker *WorkerClient) Recover(p *WorkerPool, ticket string, info *stranded
 						logger.GetLogger().Log(logger.Verbose, "worker pid <<<<", worker.pid, ">>>>req id of worker:", msg.rqId, " and  req id of mux:", worker.rqId, " does not match, Skip the EOR")
 					}
 					evname := "rrqId"
-					if (msg.rqId > worker.rqId) && ((worker.rqId > 128) || (msg.rqId < 128) /*rqId can wrap around to 0, this test checks that it did not just wrap*/) {
+					if (msg.rqId > worker.rqId) && ((worker.rqId > 10000) || (msg.rqId < 10000) /*rqId can wrap around to 0, this test checks that it did not just wrap*/) {
 						// this is not expected, so log with different name
 						evname = "rrqId_Error"
 					}
@@ -730,7 +786,7 @@ outer:
 			}
 
 			if len(calMsg) > 0 {
-				e := cal.NewCalEvent("MUX", "data_late", cal.TransOK, fmt.Sprintf("pid=%d&id=%d&pkts=", worker.pid, worker.ID)+calMsg)
+				e := cal.NewCalEvent(EvtTypeMux, "data_late", cal.TransOK, fmt.Sprintf("pid=%d&id=%d&pkts=", worker.pid, worker.ID)+calMsg)
 				e.Completed()
 			}
 			return
@@ -768,7 +824,7 @@ func (worker *WorkerClient) doRead() {
 		//
 		switch ns.Cmd {
 		case common.CmdEOR:
-			newPayload := ns.Payload[3:]
+			newPayload := ns.Payload[5:]
 			if len(payload) == 0 {
 				payload = newPayload
 			} else {
@@ -780,7 +836,8 @@ func (worker *WorkerClient) doRead() {
 				}
 			}
 			eor := int(ns.Payload[0] - '0')
-			rqId := (uint16(ns.Payload[1]) << 8) + uint16(ns.Payload[2])
+			rqId := (uint32(ns.Payload[1]) << 24) + (uint32(ns.Payload[2]) << 16) + (uint32(ns.Payload[3]) << 8) + uint32(ns.Payload[4])
+			atomic.StoreUint32(&(worker.sqlStartTimeMs), 0) // Reset the sqlStartTimeMs to avoid being picked up during saturation/recover event
 			if logger.GetLogger().V(logger.Verbose) {
 				logger.GetLogger().Log(logger.Verbose, "workerclient (<<< pid =", worker.pid, ",wrqId:", worker.rqId, "): EOR code:", eor, ", rqId: ", rqId, ", data:", DebugString(payload))
 			}
@@ -833,7 +890,7 @@ func (worker *WorkerClient) doRead() {
 func (worker *WorkerClient) Write(ns *netstring.Netstring, nsCount uint16) error {
 	worker.setState(wsBusy)
 
-	worker.rqId += nsCount
+	worker.rqId += uint32(nsCount)
 
 	//
 	// racmaint query could come after a worker is already terminated during mux shutdown.

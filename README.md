@@ -9,19 +9,20 @@ Oracle databases.  It supports sharding the databases for horizontal scaling.
   * [Configuration](docs/configuration.md)
   * [Sharding](docs/sharding.md)
   * [Transparent failover](docs/taf.md)
+  * [Bind Eviction](docs/bindevict.md)
   * [History](docs/history.md)
   * [Contributing](docs/contributing.md)
 
 # What is Hera
 
-     Hera is Data Access Gateway for  databases and is a key enabler for scaling and improving availability databases.
-    - It Protects the database from resource exhaustion by evicting poorly performing queries,
-    - Intelligently routes read/write traffic appropriately for better load balancing,
-    - Improves tolerance to database outages,
-    - Provides high performance secured connections between applications and Hera
-    - Provides domain agnostic database sharding for horizontal database scaling.
-    - Automatic transaction application failover between replica databases
-    - And many more site resiliency features.
+Hera is Data Access Gateway that helps to enable scaling and improving the availability of databases.
+* Protects the database from resource exhaustion by evicting poorly performing queries
+* Intelligently routes read/write traffic appropriately for better load balancing
+* Improves tolerance to database outages
+* Provides high performance secured connections between applications and Hera
+* Provides domain agnostic database sharding for horizontal database scaling
+* Automatic transaction application failover between replica databases
+* And many more site resiliency features
 
 # Getting Started
 
@@ -32,7 +33,7 @@ You can build mux using either [Docker](#docker-build) or [manual](#manual-build
 For development, the following docker commands can help get started
 
     docker run --network host --name mysql-11 -e MYSQL_ROOT_PASSWORD=62-AntHill -d mysql:latest
-    docker exec -it mysql-11 bash -c 'echo "create database clocschema;" | mysql -u root -h 127.0.0.1 -p62-AntHill'
+    docker exec -it mysql-11 bash -c 'echo "create database testschema;" | mysql -u root -h 127.0.0.1 -p62-AntHill'
     cd hera/tests/devdocker
     mkdir -p src/github.com/paypal/hera
     rsync -av --exclude tests/devdocker ../.. src/github.com/paypal/hera
@@ -52,7 +53,7 @@ The following sections explain the process for manually building mux without Doc
 ### Install Dependencies
 
 1.  [Install Go 1.10+](http://golang.org/doc/install).
-2.  Install [MySQL](http://dev.mysql.com/downloads/mysql) or Oracle(https://www.oracle.com/index.html).
+2.  Install [MySQL](http://dev.mysql.com/downloads/mysql) or [Oracle](https://www.oracle.com/index.html).
 3.  Install the [MySQL driver](https://github.com/go-sql-driver/mysql) and the [Oracle driver](https://github.com/go-goracle/goracle)
 3.  Install Oracle instant client     
 
@@ -92,11 +93,16 @@ The following sections explain the process for manually building mux without Doc
     ```
 6.  Build Java test client under the client/java directory
 
+7.  Build the C++ oracleworker
+    ```
+    cd worker/cppworker/worker
+    make -f ../build/makefile19
+    ```
 ### Running the server
 
 To run mux there is minimal configuration required. Please see examples for running with [MySQL](https://github.com/paypal/hera/tree/master/tests/e2e/srvmysql) or [Oracle](https://github.com/paypal/hera/tree/master/tests/e2e/srvoracle).
-The main configuration file is hera.txt, which must contain the TCP port where the server listens and the number of workers. The user name, password and the data source are passsed via environment parameters.
-```    
+The main configuration file is hera.txt, which must contain the TCP port where the server listens and the number of workers. The user name, password and the data source are passed via environment parameters.
+```bash
     # the proxy executable
     ln -s $GOPATH/bin/mux .
     # the MySQL worker
